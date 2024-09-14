@@ -3,12 +3,16 @@ import threading
 from pymongo import MongoClient
 from pymongo.errors import PyMongoError
 import asyncio
+import os
 
-# MongoDB connection URI (replace with your URI)
-MONGO_URI = "mongodb://localhost:27017/"
+# Connect to the MongoDB server (localhost:27017 by default)
+mongo_user = os.getenv('MONGODB_USER')
+mongo_password = os.getenv('MONGODB_PASSWORD')
+mongo_host = os.getenv('MONGODB_HOST', 'localhost')  # Default to localhost if not set
+mongo_port = os.getenv('MONGODB_PORT', 27017)  # Default to 27017 if not set
 
-# Connect to MongoDB
-client = MongoClient(MONGO_URI)
+connection_string = f"mongodb://{mongo_user}:{mongo_password}@{mongo_host}:{mongo_port}"
+client = MongoClient(connection_string)
 
 db = client['comments']
 watch_collection = db["doc1"]
