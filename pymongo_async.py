@@ -5,6 +5,7 @@ from bson.json_util import dumps
 import motor.motor_asyncio
 import uvicorn
 import os
+from json import loads
 
 app = FastAPI()
 
@@ -28,7 +29,7 @@ client = motor.motor_asyncio.AsyncIOMotorClient(
 db = client['comments']
 users_db = client['users']
 
-@app.post("/add_comment/{topic}")
+@app.post("/comment/{topic}")
 async def add_comment(topic: str, payload: Dict[str, Any]):
     collection = db[topic]
     try:
@@ -39,8 +40,8 @@ async def add_comment(topic: str, payload: Dict[str, Any]):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/add_subscription/{topic}")
-async def add_comment(topic: str, payload: Dict[str, Any]):
+@app.post("/subscription/{topic}")
+async def add_subscription(topic: str):
     user_id = "matt" #TODO pull from headers
     # Check if user exists in the database
     try:
@@ -56,18 +57,29 @@ async def add_comment(topic: str, payload: Dict[str, Any]):
             return {"message": f"Subscribed to topic: {topic} (new user created)"}
 
         raise HTTPException(status_code=500, detail="Failed to add subscription")
-
-
-        # collection = users_db["subscriptions"]
-
-        # # Insert the comment into the MongoDB collection
-        # payload["timestamp"] = datetime.now() 
-        # result = await collection.insert_one(payload)
-        # return {"message": "Comment added successfully", "id": str(result.inserted_id)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/get_comment/{topic}")
+@app.delete("/subscription/{topic}")
+async def delete_subscription(topic: str):
+    user_id = "matt" #TODO pull from headers
+    # Check if user exists in the database
+    try:
+        result = await users_db["subscriptions"].update_one(
+            {"_id": user_id},
+            {"$pull": {"subscriptions": topic}}  # Add the topic if not already present
+        )
+
+        if result.modified_count > 0:
+            return {"message": f"Removed subscription to topic: {topic}"}
+        elif result.modified_count is not None:
+            return {"message": f"{topic} topic not found"}
+
+        raise HTTPException(status_code=500, detail="Failed to add subscription")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/comment/{topic}")
 async def get_comment(topic: str):
     # collection = db["doc1"]
     collection = db[topic]
@@ -78,7 +90,25 @@ async def get_comment(topic: str):
         comments_list = [doc async for doc in comments_cursor]
 
         # Convert the list of comments to JSON using bson.json_util.dumps
-        comments_json = dumps(comments_list)
+        comments_json = loads(dumps(comments_list))
+
+        return comments_json
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/subscription")
+async def get_subscriptions():
+    user_id = "matt" #TODO pull from headers
+    collection = users_db["subscriptions"]
+
+    try:
+        # Retrieve all documents from the 'comments' collection
+        comments_cursor =  collection.find({"_id": user_id})
+        comments_list = [doc async for doc in comments_cursor]
+
+        # Convert the list of comments to JSON using bson.json_util.dumps
+        # comments_json = dumps(comments_list)
+        comments_json = comments_list
 
         return comments_json
     except Exception as e:
@@ -87,6 +117,9 @@ async def get_comment(topic: str):
 if __name__ == "__main__":
     uvicorn.run("__main__:app", host="0.0.0.0", port=8000, reload=True, workers=2)
 
-# curl -X GET http://127.0.0.1:8000/get_comment/doc1 -H "Content-Type: application/json"
-# curl -X POST http://127.0.0.1:8000/add_comment/doc1 -H "Content-Type: application/json" -d '{"body":"api works for new docs!"}'
-# curl -X POST http://127.0.0.1:8000/add_subscription/topicA -H "Content-Type: application/json" -d '{"body":"api works for new docs!"}'
+# curl -X GET http://127.0.0.1:8000/comment/doc1 -H "Content-Type: application/json"
+# curl -X POST http://127.0.0.1:8000/comment/doc1 -H "Content-Type: application/json" -d '{"body":"api works for new docs!"}'
+
+# curl -X GET http://127.0.0.1:8000/subscription -H "Content-Type: application/json" | jq
+# curl -X POST http://127.0.0.1:8000/subscription/topicA -H "Content-Type: application/json" -d '{"body":"api works for new docs!"}'
+# curl -X DELETE http://127.0.0.1:8000/subscription/topicA -H "Content-Type: application/json" | jq
