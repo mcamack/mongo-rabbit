@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Depends
 from typing import Dict, Any
 from datetime import datetime
 from bson.json_util import dumps
@@ -10,8 +10,32 @@ from aio_pika import connect_robust, ExchangeType
 from aio_pika.abc import AbstractRobustConnection
 import asyncio
 from aiormq.exceptions import ProbableAuthenticationError
+from contextlib import asynccontextmanager
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    try:
+        # Create RabbitMQ connection during startup
+        rabbitmq_connection = await connect_robust("amqp://user:pass@localhost/")
+        print("RabbitMQ connection established.")
+        
+        # Store connection in app.state
+        app.state.rabbitmq_connection = rabbitmq_connection
+        # app.state.rabbitmq_channel = rabbitmq_connection.channel()
+
+        # Yield control back to FastAPI with a RabbitMQ channel open for use
+        async with rabbitmq_connection.channel() as channel:
+            app.state.rabbitmq_channel = channel
+            yield
+
+        # Close RabbitMQ connection during shutdown
+        await rabbitmq_connection.close()
+        print("RabbitMQ connection closed.")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Create FastAPI app with lifespan
+app = FastAPI(lifespan=lifespan)
 
 # MongoDB Connection
 mongo_user = os.getenv('MONGODB_USER')
@@ -30,61 +54,49 @@ mongo_client = motor.motor_asyncio.AsyncIOMotorClient(
     minPoolSize=5   # Min connections in the pool
 )
 
-# RabbitMQ Connection
-async def rabbitmq_connect():
-    try:
-        print("Creating RabbitMQ pool...")
-       
-        connection = await connect_robust("amqp://user:pass@localhost/")
-        channel = await connection.channel()
-
-        await channel.set_qos(10)
-        return channel
-    except ProbableAuthenticationError as e:
-        print("Error: Auth failed\n", e)
-
 db = mongo_client['comments']
 users_db = mongo_client['users']
 
 async def subscription_transaction(user_id, topic):
+    # rabbitmq_connection = app.state.rabbitmq_connection  # Access the connection directly
+    rabbitmq_channel = app.state.rabbitmq_channel  # Access the channel directly
+
     # Start a MongoDB session for transaction
     async with await mongo_client.start_session() as session:
-        session.start_transaction()
+        async with session.start_transaction():
 
-        try:
-            # Step 1: Update MongoDB to save the user's subscription
-            update_result = await db["subscriptions"].update_one(
-                {"user_id": user_id},
-                {"$addToSet": {"subscriptions": topic}},  # Add the topic to the subscriptions array if not already there
-                upsert=True,
-                session=session  # Perform the update within the transaction
-            )
-            print(f"MongoDB update: {update_result.modified_count} document(s) modified.")
-            
-            # Step 2: Create RabbitMQ binding
-            # connection = pika.BlockingConnection(rabbitmq_conn_params)
-            # channel = connection.channel()
-            channel = await rabbitmq_connect()
-            
-            exchange_name = 'testB'
-            queue_name = f"queue_{user_id}"
-            routing_key = f"topic.{topic}"
+            try:
+                # Step 1: Update MongoDB to save the user's subscription
+                update_result = await db["subscriptions"].update_one(
+                    {"user_id": user_id},
+                    {"$addToSet": {"subscriptions": topic}},  # Add the topic to the subscriptions array if not already there
+                    upsert=True,
+                    session=session  # Perform the update within the transaction
+                )
+                print(f"MongoDB update: {update_result.modified_count} document(s) modified.")
+                
+                exchange_name = 'testB'
+                queue_name = f"queue_{user_id}"
+                routing_key = f"topic.{topic}"    
 
-            await create_rabbitmq_binding(channel, exchange_name, queue_name, routing_key)
+                # Step 2: Create RabbitMQ binding
+                await create_rabbitmq_binding(rabbitmq_channel, exchange_name, queue_name, routing_key)
 
-            # Step 3: Commit the MongoDB transaction if RabbitMQ succeeded
-            session.commit_transaction()
-            print("Transaction committed.")
+                # Step 3: Commit the MongoDB transaction if RabbitMQ succeeded
+                session.commit_transaction()
+                print("Mongo Transaction committed.")
 
-        except Exception as e:
-            # Step 4: Rollback the MongoDB transaction if RabbitMQ binding fails
-            print(f"Error occurred: {e}. Rolling back MongoDB transaction.")
-            session.abort_transaction()
-            print("Transaction aborted.")
+                if update_result.modified_count > 0:
+                    return f"Added subscription to topic: {topic} for user: {user_id}"
+                elif update_result.modified_count is not None:
+                    return "No updates made."
 
-        # finally:
-        #     if 'connection' in locals():
-        #         connection.close()
+            except Exception as e:
+                # Step 4: Rollback the MongoDB transaction if RabbitMQ binding fails
+                print(f"Error occurred: {e}. Rolling back MongoDB transaction.")
+                session.abort_transaction()
+                print("Transaction aborted.")
+                raise HTTPException(status_code=500, detail=str(e))
 
 async def create_rabbitmq_binding(channel, exchange_name, queue_name, routing_key):
     try:
@@ -99,21 +111,10 @@ async def create_rabbitmq_binding(channel, exchange_name, queue_name, routing_ke
 @app.post("/subscription/{topic}")
 async def add_subscription(topic: str):
     user_id = "matt" #TODO pull from headers
-    # Check if user exists in the database
+
     try:
-        await subscription_transaction(user_id, topic)
-        # result = await users_db["subscriptions"].update_one(
-        #     {"_id": user_id},
-        #     {"$addToSet": {"subscriptions": topic}},  # Add the topic if not already present
-        #     upsert=True  # Create the document if the user doesn't exist
-        # )
-
-        # if result.matched_count > 0:
-        #     return {"message": f"Subscribed to topic: {topic} (existing user)"}
-        # elif result.upserted_id is not None:
-        #     return {"message": f"Subscribed to topic: {topic} (new user created)"}
-
-        # raise HTTPException(status_code=500, detail="Failed to add subscription")
+        result = await subscription_transaction(user_id, topic)
+        return {"message": result}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -183,7 +184,7 @@ async def get_subscriptions():
         raise HTTPException(status_code=500, detail=str(e))
     
 async def main():
-    await asyncio.create_task(rabbitmq_connect())
+    # await asyncio.create_task(rabbitmq_connect())
     uvicorn.run("__main__:app", host="0.0.0.0", port=8000, reload=True, workers=2)
 
 if __name__ == "__main__":
