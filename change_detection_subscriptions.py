@@ -49,43 +49,23 @@ async def rabbitmq_create_pool():
         await create_rabbitmq_binding(channel, "testExchangeA", "testQueueA","testRoutingKeyA")
         
 async def add_subscription(user_id, topic):
-    # Start a MongoDB session for transaction
-    with client.start_session() as session:
-        session.start_transaction()
+    try:        
+        connection = pika.BlockingConnection(rabbitmq_conn_params)
+        channel = connection.channel()
+        
+        exchange_name = 'topic_exchange'
+        queue_name = f"queue_{user_id}"
+        routing_key = f"topic.{topic}"
 
-        try:
-            # Step 1: Update MongoDB to save the user's subscription
-            update_result = db["subscriptions"].update_one(
-                {"user_id": user_id},
-                {"$addToSet": {"subscriptions": topic}},  # Add the topic to the subscriptions array if not already there
-                upsert=True,
-                session=session  # Perform the update within the transaction
-            )
-            print(f"MongoDB update: {update_result.modified_count} document(s) modified.")
-            
-            # Step 2: Create RabbitMQ binding
-            connection = pika.BlockingConnection(rabbitmq_conn_params)
-            channel = connection.channel()
-            
-            exchange_name = 'topic_exchange'
-            queue_name = f"queue_{user_id}"
-            routing_key = f"topic.{topic}"
+        create_rabbitmq_binding(channel, exchange_name, queue_name, routing_key)
 
-            create_rabbitmq_binding(channel, exchange_name, queue_name, routing_key)
+    except Exception as e:
+        print(f"Error occurred: {e}. Rolling back MongoDB transaction.")
+        print("Transaction aborted.")
 
-            # Step 3: Commit the MongoDB transaction if RabbitMQ succeeded
-            session.commit_transaction()
-            print("Transaction committed.")
-
-        except Exception as e:
-            # Step 4: Rollback the MongoDB transaction if RabbitMQ binding fails
-            print(f"Error occurred: {e}. Rolling back MongoDB transaction.")
-            session.abort_transaction()
-            print("Transaction aborted.")
-
-        finally:
-            if 'connection' in locals():
-                connection.close()
+    finally:
+        if 'connection' in locals():
+            connection.close()
 
 async def monitor_changes():
     """Open a change stream on the collection"""
@@ -110,20 +90,7 @@ async def monitor_changes():
 #  'wallTime': datetime.datetime(2024, 9, 1, 4, 35, 47, 908000), 
 #  'fullDocument': {'_id': ObjectId('66d3ef237469c95edc2c0b49'), 'doc': 'doc1', 'body': 'api works for new docs!', 'timestamp': datetime.datetime(2024, 8, 31, 21, 35, 47, 902000)}, 'ns': {'db': 'comments', 'coll': 'doc1'}, 'documentKey': {'_id': ObjectId('66d3ef237469c95edc2c0b49')}}
 
-# # Run the change stream monitor in a separate thread
-# change_stream_thread = threading.Thread(target=monitor_changes)
-# change_stream_thread.daemon = True
-# change_stream_thread.start()
-
-# asyncio.run(monitor_changes(2))
-# asyncio.run(monitor_changes(4))
-
 async def main():
-    # await rabbitmq_create_pool()
-    t1 = asyncio.create_task(monitor_changes())
-    await t1
+    await asyncio.create_task(monitor_changes())
 
 asyncio.run(main())
-
-# curl -X GET http://127.0.0.1:8000/get_comment -H "Content-Type: application/json"
-# curl -X POST http://127.0.0.1:8000/add_comment -H "Content-Type: application/json" -d '{"doc":"doc2","body":"api works for new docs!"}'

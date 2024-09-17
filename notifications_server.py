@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Request, Depends
+from fastapi import FastAPI, HTTPException, Header
 from typing import Dict, Any
 from datetime import datetime
 from bson.json_util import dumps
@@ -21,7 +21,6 @@ async def lifespan(app: FastAPI):
         
         # Store connection in app.state
         app.state.rabbitmq_connection = rabbitmq_connection
-        # app.state.rabbitmq_channel = rabbitmq_connection.channel()
 
         # Yield control back to FastAPI with a RabbitMQ channel open for use
         async with rabbitmq_connection.channel() as channel:
@@ -54,42 +53,60 @@ mongo_client = motor.motor_asyncio.AsyncIOMotorClient(
     minPoolSize=5   # Min connections in the pool
 )
 
-db = mongo_client['comments']
-users_db = mongo_client['users']
+# MongoDB Database and Collection
+mongo_database = os.getenv('MONGODB_DATABASE', 'users')
+mongo_collection = os.getenv('MONGODB_DATABASE', 'subscriptions')
 
-async def subscription_transaction(user_id, topic):
-    # rabbitmq_connection = app.state.rabbitmq_connection  # Access the connection directly
-    rabbitmq_channel = app.state.rabbitmq_channel  # Access the channel directly
+db = mongo_client[mongo_database]
+collection = db[mongo_collection]
+
+async def subscription_transaction(userid, topic, add=True):
+    rabbitmq_channel = app.state.rabbitmq_channel
 
     # Start a MongoDB session for transaction
     async with await mongo_client.start_session() as session:
         async with session.start_transaction():
 
-            try:
-                # Step 1: Update MongoDB to save the user's subscription
-                update_result = await db["subscriptions"].update_one(
-                    {"user_id": user_id},
-                    {"$addToSet": {"subscriptions": topic}},  # Add the topic to the subscriptions array if not already there
-                    upsert=True,
-                    session=session  # Perform the update within the transaction
-                )
-                print(f"MongoDB update: {update_result.modified_count} document(s) modified.")
-                
+            try:                
                 exchange_name = 'testB'
-                queue_name = f"queue_{user_id}"
+                queue_name = f"queue_{userid}"
                 routing_key = f"topic.{topic}"    
 
-                # Step 2: Create RabbitMQ binding
-                await create_rabbitmq_binding(rabbitmq_channel, exchange_name, queue_name, routing_key)
+                if add: # Adding a new subscription
+                    update_result = await collection.update_one(
+                        {"userid": userid},
+                        {"$addToSet": {"subscriptions": topic}},  # Add the topic to the subscriptions array if not already there
+                        upsert=True, # Add the userid if it wasn't found
+                        session=session  # Perform the update within the transaction
+                    )
+                    print(f"MongoDB update: {update_result.modified_count} document(s) modified.")
+                    print(update_result)
+                    
+                    await create_rabbitmq_binding(rabbitmq_channel, exchange_name, queue_name, routing_key)
+                    
+                    if update_result.modified_count > 0:
+                        return f"Added subscription to topic: {topic} for user: {userid}"
+                    elif update_result.modified_count is not None:
+                        return "No updates made."
+                else: # Removing a subscription
+                    update_result = await collection.update_one(
+                        {"userid": userid},
+                        {"$pull": {"subscriptions": topic}},  # Remove the topic from the subscriptions array if there
+                        upsert=True, # Add the userid if it wasn't found
+                        session=session  # Perform the update within the transaction
+                    )
+                    print(f"MongoDB update: {update_result.modified_count} document(s) modified.")
+
+                    await delete_rabbitmq_binding(rabbitmq_channel, exchange_name, queue_name, routing_key)
+
+                    if update_result.modified_count > 0:
+                        return f"Deleted subscription to topic: {topic} for user: {userid}"
+                    elif update_result.modified_count is not None:
+                        return "No updates made."
 
                 # Step 3: Commit the MongoDB transaction if RabbitMQ succeeded
                 session.commit_transaction()
                 print("Mongo Transaction committed.")
-
-                if update_result.modified_count > 0:
-                    return f"Added subscription to topic: {topic} for user: {user_id}"
-                elif update_result.modified_count is not None:
-                    return "No updates made."
 
             except Exception as e:
                 # Step 4: Rollback the MongoDB transaction if RabbitMQ binding fails
@@ -107,92 +124,46 @@ async def create_rabbitmq_binding(channel, exchange_name, queue_name, routing_ke
     except Exception as e:
         print(f"Failed to create RabbitMQ binding: {e}")
         raise e  # Propagate the exception
-        
-@app.post("/subscription/{topic}")
-async def add_subscription(topic: str):
-    user_id = "matt" #TODO pull from headers
 
+async def delete_rabbitmq_binding(channel, exchange_name, queue_name, routing_key):
     try:
-        result = await subscription_transaction(user_id, topic)
+        queue = await channel.declare_queue(queue_name, passive=False, exclusive=False, durable=True)
+        await queue.unbind(exchange_name, routing_key)
+        print(f"RabbitMQ binding deleted: {exchange_name}, {queue_name}, {routing_key}")
+    except Exception as e:
+        print(f"Failed to delete RabbitMQ binding: {e}")
+        raise e  # Propagate the exception
+
+
+############################### Routes ###############################
+
+@app.post("/subscription/{topic}")
+async def add_subscription(topic: str, userid: str = Header(None)):
+    try:
+        result = await subscription_transaction(userid, topic)
         return {"message": result}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/comment/{topic}")
-async def add_comment(topic: str, payload: Dict[str, Any]):
-    collection = db[topic]
-    try:
-        # Insert the comment into the MongoDB collection
-        payload["timestamp"] = datetime.now() 
-        result = await collection.insert_one(payload)
-        return {"message": "Comment added successfully", "id": str(result.inserted_id)}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
 @app.delete("/subscription/{topic}")
-async def delete_subscription(topic: str):
-    user_id = "matt" #TODO pull from headers
-    # Check if user exists in the database
+async def delete_subscription(topic: str, userid: str = Header(None)):
     try:
-        result = await users_db["subscriptions"].update_one(
-            {"_id": user_id},
-            {"$pull": {"subscriptions": topic}}  # Add the topic if not already present
-        )
-
-        if result.modified_count > 0:
-            return {"message": f"Removed subscription to topic: {topic}"}
-        elif result.modified_count is not None:
-            return {"message": f"{topic} topic not found"}
-
-        raise HTTPException(status_code=500, detail="Failed to add subscription")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/comment/{topic}")
-async def get_comment(topic: str):
-    # collection = db["doc1"]
-    collection = db[topic]
-
-    try:
-        # Retrieve all documents from the 'comments' collection
-        comments_cursor =  collection.find()
-        comments_list = [doc async for doc in comments_cursor]
-
-        # Convert the list of comments to JSON using bson.json_util.dumps
-        comments_json = loads(dumps(comments_list))
-
-        return comments_json
+        result = await subscription_transaction(userid, topic, add=False)
+        return {"message": result}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/subscription")
-async def get_subscriptions():
-    user_id = "matt" #TODO pull from headers
-    collection = users_db["subscriptions"]
-
+async def get_subscriptions(userid: str = Header(None)):
     try:
-        # Retrieve all documents from the 'comments' collection
-        comments_cursor =  collection.find({"_id": user_id})
-        comments_list = [doc async for doc in comments_cursor]
-
-        # Convert the list of comments to JSON using bson.json_util.dumps
-        # comments_json = dumps(comments_list)
-        comments_json = comments_list
-
-        return comments_json
+        async for document in collection.find({"userid": userid}, {"subscriptions": 1}):
+            return document["subscriptions"]
+    
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     
 async def main():
-    # await asyncio.create_task(rabbitmq_connect())
     uvicorn.run("__main__:app", host="0.0.0.0", port=8000, reload=True, workers=2)
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-# curl -X GET http://127.0.0.1:8000/comment/doc1 -H "Content-Type: application/json"
-# curl -X POST http://127.0.0.1:8000/comment/doc1 -H "Content-Type: application/json" -d '{"body":"api works for new docs!"}'
-
-# curl -X GET http://127.0.0.1:8000/subscription -H "Content-Type: application/json" | jq
-# curl -X POST http://127.0.0.1:8000/subscription/topicA -H "Content-Type: application/json" -d '{"body":"api works for new docs!"}'
-# curl -X DELETE http://127.0.0.1:8000/subscription/topicA -H "Content-Type: application/json" | jq
