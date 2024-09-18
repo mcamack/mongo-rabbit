@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Header
+from fastapi import FastAPI, HTTPException
 from typing import Dict, Any
 from datetime import datetime
 from bson.json_util import dumps
@@ -6,36 +6,12 @@ import motor.motor_asyncio
 import uvicorn
 import os
 from json import loads
-from aio_pika import connect_robust, ExchangeType
-from aio_pika.abc import AbstractRobustConnection
+from aio_pika import connect_robust
 import asyncio
-from aiormq.exceptions import ProbableAuthenticationError
 from contextlib import asynccontextmanager
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    try:
-        # Create RabbitMQ connection during startup
-        rabbitmq_connection = await connect_robust("amqp://user:pass@localhost/")
-        print("RabbitMQ connection established.")
-        
-        # Store connection in app.state
-        app.state.rabbitmq_connection = rabbitmq_connection
-        # app.state.rabbitmq_channel = rabbitmq_connection.channel()
-
-        # Yield control back to FastAPI with a RabbitMQ channel open for use
-        async with rabbitmq_connection.channel() as channel:
-            app.state.rabbitmq_channel = channel
-            yield
-
-        # Close RabbitMQ connection during shutdown
-        await rabbitmq_connection.close()
-        print("RabbitMQ connection closed.")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
 # Create FastAPI app with lifespan
-app = FastAPI(lifespan=lifespan)
+app = FastAPI()
 
 # MongoDB Connection
 mongo_user = os.getenv('MONGODB_USER')
@@ -44,12 +20,6 @@ mongo_host = os.getenv('MONGODB_HOST', 'localhost')  # Default to localhost if n
 mongo_port = os.getenv('MONGODB_PORT', 27017)  # Default to 27017 if not set
 mongo_client = motor.motor_asyncio.AsyncIOMotorClient(
     f"mongodb://{mongo_user}:{mongo_password}@{mongo_host}:{mongo_port}",
-    # read_preference='secondaryPreferred',
-    # write_concern={'w': 'majority'},
-    # ssl=True,
-    # ssl_certfile='/path/to/cert.pem',
-    # ssl_keyfile='/path/to/key.pem',
-    # ssl_ca_certs='/path/to/ca.pem',
     maxPoolSize=10,  # Max connections in the pool
     minPoolSize=5   # Min connections in the pool
 )

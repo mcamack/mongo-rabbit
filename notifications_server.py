@@ -42,13 +42,14 @@ mongo_password = os.getenv('MONGODB_PASSWORD')
 mongo_host = os.getenv('MONGODB_HOST', 'localhost')  # Default to localhost if not set
 mongo_port = os.getenv('MONGODB_PORT', 27017)  # Default to 27017 if not set
 mongo_client = motor.motor_asyncio.AsyncIOMotorClient(
+    # f"mongodb://{mongo_user}:{mongo_password}@{mongo_host}:{mongo_port}/?authSource=admin&ssl=true",
     f"mongodb://{mongo_user}:{mongo_password}@{mongo_host}:{mongo_port}",
     # read_preference='secondaryPreferred',
     # write_concern={'w': 'majority'},
-    # ssl=True,
-    # ssl_certfile='/path/to/cert.pem',
-    # ssl_keyfile='/path/to/key.pem',
-    # ssl_ca_certs='/path/to/ca.pem',
+    # tls=True,
+    # tlsCAFile='./generated-cert.pem',  # Path to the CA certificate
+    # tlsCertificateKeyFile='./generated-key2.pem',  # Path to the client certificate (optional)
+    # tlsAllowInvalidCertificates=True,  # Enforce strict certificate validation
     maxPoolSize=10,  # Max connections in the pool
     minPoolSize=5   # Min connections in the pool
 )
