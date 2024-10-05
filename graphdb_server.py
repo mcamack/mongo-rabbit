@@ -124,7 +124,7 @@ async def add_relationship(request: GraphRelationship):
         raise HTTPException(status_code=500, detail=str(e))
 
 async def main():
-    uvicorn.run("__main__:app", host="0.0.0.0", port=8002, reload=True, workers=2)
+    uvicorn.run("__main__:app", host="0.0.0.0", port=8002, reload=True, workers=1)
 
 if __name__ == "__main__":
     asyncio.run(main())

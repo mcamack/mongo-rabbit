@@ -9,10 +9,11 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Header
 from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo.collection import Collection
+from pymongo.database import Database
 
 # Get env vars
 NOTIFICATIONS_PORT =        os.getenv('NOTIFICATIONS_PORT', 8000)
-NOTIFICATIONS_WORKERS =     os.getenv('NOTIFICATIONS_WORKERS', 2)
+NOTIFICATIONS_WORKERS =     os.getenv('NOTIFICATIONS_WORKERS', 1)
 
 MONGODB_USER =              os.getenv('MONGODB_USER')
 MONGODB_PASSWORD =          os.getenv('MONGODB_PASSWORD')
@@ -44,16 +45,32 @@ async def lifespan(app: FastAPI):
             f"mongodb://{MONGODB_USER}:{MONGODB_PASSWORD}@{MONGODB_HOST}:{MONGODB_PORT}",
             # read_preference='secondaryPreferred',
             # write_concern={'w': 'majority'},
-            # tls=True,
+            tls=True,
             # tlsCAFile='./generated-cert.pem',  # Path to the CA certificate
+            # tlsCAFile='/tmp/mongotest/mongodb.pem',  # Path to the CA certificate
+            tlsCAFile='/tmp/mongotest2/ca.crt',  # Path to the CA certificate
             # tlsCertificateKeyFile='./generated-key2.pem',  # Path to the client certificate (optional)
-            # tlsAllowInvalidCertificates=True,  # Enforce strict certificate validation
+            # tlsCertificateKeyFile='/tmp/mongotest/mongodb-client.pem',  # Path to the client certificate (optional)
+            tlsCertificateKeyFile='client.pem',  # Path to the client certificate (optional)
+            tlsAllowInvalidCertificates=False,  # Enforce strict certificate validation   
+            tlsAllowInvalidHostnames=True,         
             maxPoolSize=10,  # Max connections in the pool
             minPoolSize=5   # Min connections in the pool
         )        
 
+        # {
+        #     "detail": "localhost:27017: [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: 
+        #     Hostname mismatch, certificate is not valid for 'localhost'. (_ssl.c:1145) 
+        #     (configured timeouts: socketTimeoutMS: 20000.0ms, connectTimeoutMS: 20000.0ms), 
+        #     Timeout: 30s, Topology Description: <TopologyDescription id: 66f96b313380277dbbec15c1, 
+        #     topology_type: Unknown, servers: [<ServerDescription ('localhost', 27017) server_type: Unknown, 
+        #     rtt: None, error=AutoReconnect(\"localhost:27017: [SSL: CERTIFICATE_VERIFY_FAILED] 
+        #     certificate verify failed: Hostname mismatch, certificate is not valid for 'localhost'. 
+        #     (_ssl.c:1145) (configured timeouts: socketTimeoutMS: 20000.0ms, connectTimeoutMS: 20000.0ms)\")>]>"
+        # }
+
         # Store mongo stuff in app.state
-        app.state.db = app.state.mongo_client[MONGODB_DATABASE]
+        app.state.db: Database = app.state.mongo_client[MONGODB_DATABASE]
         app.state.collection: Collection = app.state.db[MONGODB_COLLECTION]
 
         # Yield control back to FastAPI with a RabbitMQ channel open for use
@@ -174,9 +191,9 @@ async def delete_subscription(topic: str, userid: str = Header(None)):
 
 @app.get("/notifications/subscription")
 async def get_subscriptions(userid: str = Header(None)):
-    collection = app.state.collection
-
     try:
+        collection = app.state.collection
+
         async for document in collection.find({"userid": userid}, {"subscriptions": 1}):
             return document["subscriptions"]
     
@@ -187,10 +204,10 @@ async def get_subscriptions(userid: str = Header(None)):
 
 @app.post("/notifications/message/{topic}")
 async def publish_message(topic: str, body: dict):
-    exchange = app.state.exchange
-    message = Message(body=json.dumps(body).encode(), delivery_mode=DeliveryMode.PERSISTENT)
-
     try:
+        exchange = app.state.exchange
+        message = Message(body=json.dumps(body).encode(), delivery_mode=DeliveryMode.PERSISTENT)
+
         print(f"Publishing message with routing key: {topic}")
         await exchange.publish(routing_key=topic, message=message)
         return {"message": f"Publishing message with routing key: {topic}"}
@@ -199,11 +216,11 @@ async def publish_message(topic: str, body: dict):
 
 @app.post("/notifications/message/broadcast/")
 async def broadcast_message(body: dict):
-    # The RABBITMQ_BROADCAST_KEY is setup in the RabbitMQ Consumer function for each user queue
-    exchange = app.state.exchange
-    message = Message(body=json.dumps(body).encode(), delivery_mode=DeliveryMode.PERSISTENT)
-
     try:
+        # The RABBITMQ_BROADCAST_KEY is setup in the RabbitMQ Consumer function for each user queue
+        exchange = app.state.exchange
+        message = Message(body=json.dumps(body).encode(), delivery_mode=DeliveryMode.PERSISTENT)
+
         print(f"Broadcasting message.")
         await exchange.publish(routing_key=RABBITMQ_BROADCAST_KEY, message=message)
         return {"message": "Broadcasted message."}

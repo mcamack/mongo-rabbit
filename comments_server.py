@@ -35,7 +35,7 @@ def bson_to_json_serializable(document):
 
 # Get env vars
 COMMENTS_PORT =             os.getenv('COMMENTS_PORT', 8001)
-COMMENTS_WORKERS =          os.getenv('COMMENTS_WORKERS', 2)
+COMMENTS_WORKERS =          os.getenv('COMMENTS_WORKERS', 1)
 
 MONGODB_USER =              os.getenv('MONGODB_USER')
 MONGODB_PASSWORD =          os.getenv('MONGODB_PASSWORD')
@@ -78,8 +78,9 @@ app = FastAPI(lifespan=lifespan)
 
 @app.post("/comment/{topic}")
 async def add_comment(topic: str, payload: Dict[str, Any]):
-    collection = app.state.db[topic]
     try:
+        collection = app.state.db[topic]
+
         # Insert the comment into the MongoDB collection
         payload["timestamp"] = datetime.now() 
         result = await collection.insert_one(payload)
@@ -89,9 +90,9 @@ async def add_comment(topic: str, payload: Dict[str, Any]):
 
 @app.delete("/comment/{topic}/{docid}")
 async def delete_subscription(topic: str, docid: str):
-    collection = app.state.db[topic]
-
     try:
+        collection = app.state.db[topic]
+
         # Convert the string document_id to ObjectId
         object_id = ObjectId(docid)
         
@@ -108,9 +109,9 @@ async def delete_subscription(topic: str, docid: str):
     
 @app.get("/comment/{topic}")
 async def get_comment(topic: str):
-    collection = app.state.db[topic]
-
     try:
+        collection = app.state.db[topic]
+
        # Retrieve all documents from the 'comments' collection
         comments_cursor =  collection.find()
         comments_list = [doc async for doc in comments_cursor]
@@ -123,9 +124,9 @@ async def get_comment(topic: str):
     
 @app.get("/comment/{topic}/{docid}")
 async def get_comment(topic: str, docid: str):
-    collection = app.state.db[topic]
-
     try:
+        collection = app.state.db[topic]
+
         # Convert the string document_id to ObjectId if necessary
         object_id = ObjectId(docid)
 

@@ -9,14 +9,23 @@ from aio_pika.pool import Pool
 from aio_pika.abc import AbstractRobustConnection
 
 # Connect to the MongoDB server (localhost:27017 by default)
-mongo_user = os.getenv('MONGODB_USER')
-mongo_password = os.getenv('MONGODB_PASSWORD')
-mongo_host = os.getenv('MONGODB_HOST', 'localhost')  # Default to localhost if not set
-mongo_port = os.getenv('MONGODB_PORT', 27017)  # Default to 27017 if not set
+MONGODB_USER =              os.getenv('MONGODB_USER')
+MONGODB_PASSWORD =          os.getenv('MONGODB_PASSWORD')
+MONGODB_HOST =              os.getenv('MONGODB_HOST', 'localhost')  # Default to localhost if not set
+MONGODB_PORT =              os.getenv('MONGODB_PORT', 27017)  # Default to 27017 if not set
 
-connection_string = f"mongodb://{mongo_user}:{mongo_password}@{mongo_host}:{mongo_port}"
-client = MongoClient(connection_string)
-db = client['users']
+MONGODB_DATABASE =          os.getenv('MONGODB_DATABASE', 'users')
+MONGODB_COLLECTION =        os.getenv('MONGODB_DATABASE', 'subscriptions')
+
+connection_string = f"mongodb://{MONGODB_USER}:{MONGODB_PASSWORD}@{MONGODB_HOST}:{MONGODB_PORT}"
+client = MongoClient(connection_string,
+    tls=True,
+    tlsCAFile='/tmp/mongotest2/ca.crt',
+    tlsCertificateKeyFile='client.pem',
+    # tlsAllowInvalidCertificates=False,  # Enforce strict certificate validation   
+    tlsAllowInvalidHostnames=True 
+    )
+db = client[MONGODB_DATABASE]
 
 async def rabbitmq_create_pool():
     print("Creating RabbitMQ pool...")
@@ -36,7 +45,6 @@ async def rabbitmq_create_pool():
 
     async def create_rabbitmq_binding(channel, exchange_name, queue_name, routing_key):
         try:
-            # channel.exchange_declare(exchange=exchange_name, exchange_type='topic', durable=True)
             await channel.declare_exchange(exchange_name, aio_pika.ExchangeType.TOPIC, durable=True)
             queue = await channel.declare_queue(queue_name, passive=False, exclusive=False, durable=True)
             await queue.bind(exchange_name, routing_key)
@@ -48,25 +56,6 @@ async def rabbitmq_create_pool():
     async with channel_pool.acquire() as channel:    
         await create_rabbitmq_binding(channel, "testExchangeA", "testQueueA","testRoutingKeyA")
         
-async def add_subscription(user_id, topic):
-    try:        
-        connection = pika.BlockingConnection(rabbitmq_conn_params)
-        channel = connection.channel()
-        
-        exchange_name = 'topic_exchange'
-        queue_name = f"queue_{user_id}"
-        routing_key = f"topic.{topic}"
-
-        create_rabbitmq_binding(channel, exchange_name, queue_name, routing_key)
-
-    except Exception as e:
-        print(f"Error occurred: {e}. Rolling back MongoDB transaction.")
-        print("Transaction aborted.")
-
-    finally:
-        if 'connection' in locals():
-            connection.close()
-
 async def monitor_changes():
     """Open a change stream on the collection"""
 
