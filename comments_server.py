@@ -1,26 +1,15 @@
-from fastapi import FastAPI, HTTPException
-from typing import Dict, Any
-from datetime import datetime
-from bson.json_util import dumps
-import motor.motor_asyncio
-import uvicorn
-import os
-from json import loads
-from aio_pika import connect_robust
 import asyncio
-from contextlib import asynccontextmanager
-from bson.objectid import ObjectId
-import asyncio
-import json
 import os
 import uvicorn
 
-from aio_pika import connect_robust, ExchangeType, Message, DeliveryMode, Channel
-from aiormq.exceptions import AMQPConnectionError
+from bson.objectid import ObjectId
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, Header
+from datetime import datetime
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
-from pymongo.collection import Collection
+from pymongo.database import Database
+from typing import Dict, Any
 
 def bson_to_json_serializable(document):
     if isinstance(document, list):
@@ -53,17 +42,22 @@ async def lifespan(app: FastAPI):
             f"mongodb://{MONGODB_USER}:{MONGODB_PASSWORD}@{MONGODB_HOST}:{MONGODB_PORT}",
             # read_preference='secondaryPreferred',
             # write_concern={'w': 'majority'},
-            # tls=True,
+            tls=True,
             # tlsCAFile='./generated-cert.pem',  # Path to the CA certificate
+            # tlsCAFile='/tmp/mongotest/mongodb.pem',  # Path to the CA certificate
+            tlsCAFile='/tmp/mongotest2/ca.crt',  # Path to the CA certificate
             # tlsCertificateKeyFile='./generated-key2.pem',  # Path to the client certificate (optional)
-            # tlsAllowInvalidCertificates=True,  # Enforce strict certificate validation
+            # tlsCertificateKeyFile='/tmp/mongotest/mongodb-client.pem',  # Path to the client certificate (optional)
+            tlsCertificateKeyFile='client.pem',  # Path to the client certificate (optional)
+            tlsAllowInvalidCertificates=False,  # Enforce strict certificate validation   
+            tlsAllowInvalidHostnames=True,         
             maxPoolSize=10,  # Max connections in the pool
             minPoolSize=5   # Min connections in the pool
         )        
 
         # Store mongo stuff in app.state
-        app.state.db = app.state.mongo_client[MONGODB_DATABASE]
-        
+        app.state.db: Database = app.state.mongo_client[MONGODB_DATABASE]
+
         # Yield control back to FastAPI
         yield
 
@@ -75,6 +69,15 @@ async def lifespan(app: FastAPI):
 
 # Create FastAPI app with lifespan
 app = FastAPI(lifespan=lifespan)
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # List the allowed origins, can be "*" for all
+    allow_credentials=True,
+    allow_methods=["*"],  # Allow all HTTP methods
+    allow_headers=["*"],  # Allow all headers
+)
 
 @app.post("/comment/{topic}")
 async def add_comment(topic: str, payload: Dict[str, Any]):

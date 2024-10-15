@@ -1,0 +1,38 @@
+auth:
+  username: user
+  password: pass
+  erlangCookie: myerlcookie1234567890  # Secret for cluster node communication, change this if needed
+
+# tls:
+#   enabled: true
+#   existingSecret: rabbitmq-cert-secret
+#   failIfNoPeerCert: false   # Set this to true for strict certificate verification
+#   sslOptionsVerify: verify_peer  # Verifies client certificates if enabled
+
+ingress:
+  enabled: true
+  # existingSecret: rabbitmq-cert-secret
+  # tls:
+  #   - secretName: rabbitmq-cert-secret
+  #     hosts:
+  #       - localhost
+service:
+  type: LoadBalancer
+  ports:
+    amqp: 5672
+    manager: 15672
+
+rabbitmq:
+  auth:
+    username: myuser
+    password: mypassword
+  replicaCount: 1
+# extraConfiguration: |
+#   # Enable TLS in RabbitMQ configuration
+#   listeners.ssl.default = 5671
+#   ssl_options.cacertfile = /opt/bitnami/rabbitmq/certs/ca_certificate.pem
+#   ssl_options.certfile = /opt/bitnami/rabbitmq/certs/server_certificate.pem
+#   ssl_options.keyfile = /opt/bitnami/rabbitmq/certs/server_key.pem
+#   ssl_options.verify = verify_none
+#   ssl_options.fail_if_no_peer_cert = false
+
