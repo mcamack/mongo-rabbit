@@ -58,17 +58,6 @@ async def lifespan(app: FastAPI):
             minPoolSize=5   # Min connections in the pool
         )        
 
-        # {
-        #     "detail": "localhost:27017: [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: 
-        #     Hostname mismatch, certificate is not valid for 'localhost'. (_ssl.c:1145) 
-        #     (configured timeouts: socketTimeoutMS: 20000.0ms, connectTimeoutMS: 20000.0ms), 
-        #     Timeout: 30s, Topology Description: <TopologyDescription id: 66f96b313380277dbbec15c1, 
-        #     topology_type: Unknown, servers: [<ServerDescription ('localhost', 27017) server_type: Unknown, 
-        #     rtt: None, error=AutoReconnect(\"localhost:27017: [SSL: CERTIFICATE_VERIFY_FAILED] 
-        #     certificate verify failed: Hostname mismatch, certificate is not valid for 'localhost'. 
-        #     (_ssl.c:1145) (configured timeouts: socketTimeoutMS: 20000.0ms, connectTimeoutMS: 20000.0ms)\")>]>"
-        # }
-
         # Store mongo stuff in app.state
         app.state.db: Database = app.state.mongo_client[MONGODB_DATABASE]
         app.state.collection: Collection = app.state.db[MONGODB_COLLECTION]

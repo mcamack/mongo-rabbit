@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
-from neo4j import GraphDatabase, AsyncGraphDatabase
+from neo4j import AsyncGraphDatabase
 from pydantic import BaseModel
 import asyncio
 import uvicorn
@@ -34,6 +35,15 @@ async def lifespan(app: FastAPI):
 
 # Create FastAPI app with lifespan
 app = FastAPI(lifespan=lifespan)
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # List the allowed origins, can be "*" for all
+    allow_credentials=True,
+    allow_methods=["*"],  # Allow all HTTP methods
+    allow_headers=["*"],  # Allow all headers
+)
 
 labels = ["Requirement", "Analysis", 'Drawing']
 
