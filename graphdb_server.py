@@ -18,10 +18,20 @@ async def lifespan(app: FastAPI):
     try:
         # Initialize Neo4j driver
         driver = AsyncGraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
-        print("NEO4J connection established.")
+        print("Opening NEO4J connection...")
         
         # Store driver in app.state
         app.state.neo4j_driver = driver
+
+        # Test Connection
+        async with driver.session() as session:
+            # Run a simple query
+            result = session.run("RETURN 'Connection successful!' AS message")
+            # Fetch the result
+            async for record in await result:
+                message = record["message"]
+                print(message)  # Should print "Connection successful" if connection works
+                break  # We only need the first result
 
         # Yield control back to FastAPI
         yield
