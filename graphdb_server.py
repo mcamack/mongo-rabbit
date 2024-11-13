@@ -2,10 +2,11 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from neo4j import AsyncGraphDatabase
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 import asyncio
 import uvicorn
 import os
+from typing import List, Dict, Optional
 
 NEO4J_USER = os.getenv('NEO4J_USER')
 NEO4J_PASSWORD = os.getenv('NEO4J_PASSWORD')
@@ -55,93 +56,158 @@ app.add_middleware(
     allow_headers=["*"],  # Allow all headers
 )
 
-labels = ["Requirement", "Analysis", 'Drawing']
+# Predefined labels for validation
+ALLOWED_LABELS = ["Requirement", "Specification", "Component"]
+    
+@app.get("/graph/node/{label}/{name}")
+async def get_node(label: str, name: str):
+    if label not in ALLOWED_LABELS:
+        raise HTTPException(status_code=400, detail=f"Label must be from the list: {ALLOWED_LABELS}")
 
-# Route to query nodes by label
-@app.get("/graph/node/{label}")
-async def get_nodes_by_label(label: str):
     driver = app.state.neo4j_driver
-
-    try:
-        async with driver.session() as session:
-            result = await session.run(f"MATCH (n:{label}) RETURN n LIMIT 10")
-            nodes = [record["n"] for record in await result.data()]
-            return nodes
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-# Route to create a node
-@app.post("/graph/node/{name}")
-async def create_node(name: str, properties: dict):
-    driver = app.state.neo4j_driver
-     
-    try:
-        async with driver.session() as session:
-            # Check if a node with the given properties already exists
-            label = "Requirement"
-            result = await session.run(f"""
-                MERGE (p:{label} {{name: $name}})
-                RETURN p.name
-                """, {"name": name}
-            )
-
-            record = await result.single()
-            print(record)
-            
-            node = record["p.name"]
-            return {"message": "Node created", "node": node}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-# Define a Pydantic model to validate the incoming request body
-class GraphRelationship(BaseModel):
-    label1: str
-    prop1: dict
-    label2: str
-    prop2: dict
-    rel_type: str
-
-async def create_relationship(label1, prop1, label2, prop2, rel_type):
-        """
-        Creates a relationship between two nodes in the graph.
-        
-        :param label1: Label of the first node
-        :param prop1: Dictionary of properties for the first node (must have at least one property)
-        :param label2: Label of the second node
-        :param prop2: Dictionary of properties for the second node (must have at least one property)
-        :param rel_type: Type of the relationship (string)
-        """
-        driver = app.state.neo4j_driver
-
-        query = f"""
-        MERGE (a:{label1} {{ {', '.join(f'{key}: $prop1.{key}' for key in prop1)} }})
-        MERGE (b:{label2} {{ {', '.join(f'{key}: $prop2.{key}' for key in prop2)} }})
-        MERGE (a)-[r:{rel_type}]->(b)
-        RETURN a, r, b
-        """
-        print(query)
+    async with driver.session() as session:
         try:
-            async with driver.session() as session:
-                result = await session.run(query, prop1=prop1, prop2=prop2)
-                # return [record for record in result]
-                return True
+            query = "MATCH (n:{label} {{name: $name}}) RETURN n".format(label=label)
+            result = await session.run(query, {"name": name})
+            record = await result.single()
+            if not record:
+                raise HTTPException(status_code=404, detail="Node not found")
+            
+            return record["n"]._properties
+        except HTTPException as e:
+            if e.status_code < 500:
+                raise e
+            raise HTTPException(status_code=500, detail="Internal server error")
         except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
+            raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.post("/graph/node/{label}/{name}")
+async def create_node(label: str, name: str, properties: Dict[str, str]):
+    if label not in ALLOWED_LABELS:
+        raise HTTPException(status_code=400, detail=f"Label must be from the list: {ALLOWED_LABELS}")
+
+    driver = app.state.neo4j_driver
+    async with driver.session() as session:
+        try:
+            query = "MATCH (n:{label} {{name: $name}}) RETURN n LIMIT 1".format(label=label)
+            result = await session.run(query, {"name": name})
+            if (await result.single()) is not None:
+                raise HTTPException(status_code=400, detail="A node with the same label and name already exists.")
+
+            # Create the node
+            query = "CREATE (n:{label} {{name: $name}}) SET n += $properties RETURN n".format(label=label)
+            await session.run(query, {"name": name, "properties": properties})
+
+            return {"message": "Node created successfully"}
+        except HTTPException as e:
+            if e.status_code < 500:
+                raise e
+            raise HTTPException(status_code=500, detail="Internal server error")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail="Internal server error")
+    
+@app.patch("/graph/node/{label}/{name}")
+async def update_node(label: str, name: str, node_update: Dict[str, Optional[str]]):
+    if label not in ALLOWED_LABELS:
+        raise HTTPException(status_code=400, detail=f"Label must be from the list: {ALLOWED_LABELS}")
+
+    driver = app.state.neo4j_driver
+    async with driver.session() as session:
+        try:
+            # Update the properties of the existing node
+            query = "MATCH (n:{label} {{name: $name}}) SET ".format(label=label)
+            updates = ", ".join([f"n.{key} = ${key}" for key in node_update.keys()])
+            query += updates + " RETURN n"
+
+            params = {"name": name, **node_update}
+            result = await session.run(query, params)
+            if not (await result.single()):
+                raise HTTPException(status_code=404, detail="Node not found or no properties updated")
+
+            return {"message": "Node updated successfully"}
+        except HTTPException as e:
+            if e.status_code < 500:
+                raise e
+            raise HTTPException(status_code=500, detail="Internal server error")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.delete("/graph/node/{label}/{name}")
+async def delete_node(label: str, name: str):
+    if label not in ALLOWED_LABELS:
+        raise HTTPException(status_code=400, detail=f"Label must be from the list: {ALLOWED_LABELS}")
+
+    driver = app.state.neo4j_driver
+    async with driver.session() as session:
+        try:
+            query = "MATCH (n:{label} {{name: $name}}) DETACH DELETE n".format(label=label)
+            result = await session.run(query, {"name": name})
+            if (await result.consume()).counters.nodes_deleted == 0:
+                raise HTTPException(status_code=404, detail="Node not found")
+
+            return {"message": "Node deleted successfully"}
+        except HTTPException as e:
+            if e.status_code < 500:
+                raise e
+            raise HTTPException(status_code=500, detail="Internal server error")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail="Internal server error")
+
+
+
+
+
+
+# # Define a Pydantic model to validate the incoming request body
+# class GraphRelationship(BaseModel):
+#     label1: str
+#     prop1: dict
+#     label2: str
+#     prop2: dict
+#     rel_type: str
+
+# async def create_relationship(label1, prop1, label2, prop2, rel_type):
+#         """
+#         Creates a relationship between two nodes in the graph.
         
-@app.post("/graph/relationship/")
-async def add_relationship(request: GraphRelationship):
-    try:
-        result = await create_relationship(
-            request.label1, request.prop1, request.label2, request.prop2, request.rel_type
-        )
+#         :param label1: Label of the first node
+#         :param prop1: Dictionary of properties for the first node (must have at least one property)
+#         :param label2: Label of the second node
+#         :param prop2: Dictionary of properties for the second node (must have at least one property)
+#         :param rel_type: Type of the relationship (string)
+#         """
+#         driver = app.state.neo4j_driver
 
-        if result:
-            return {"message": "Relationship created successfully", "result": result}
-        else:
-            raise HTTPException(status_code=400, detail="Failed to create relationship")
+#         query = f"""
+#         MERGE (a:{label1} {{ {', '.join(f'{key}: $prop1.{key}' for key in prop1)} }})
+#         MERGE (b:{label2} {{ {', '.join(f'{key}: $prop2.{key}' for key in prop2)} }})
+#         MERGE (a)-[r:{rel_type}]->(b)
+#         RETURN a, r, b
+#         """
+#         print(query)
+#         try:
+#             async with driver.session() as session:
+#                 result = await session.run(query, prop1=prop1, prop2=prop2)
+#                 # return [record for record in result]
+#                 return True
+#         except Exception as e:
+#             raise HTTPException(status_code=500, detail=str(e))
+        
+# @app.post("/graph/relationship/")
+# async def add_relationship(request: GraphRelationship):
+#     try:
+#         result = await create_relationship(
+#             request.label1, request.prop1, request.label2, request.prop2, request.rel_type
+#         )
 
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+#         if result:
+#             return {"message": "Relationship created successfully", "result": result}
+#         else:
+#             raise HTTPException(status_code=400, detail="Failed to create relationship")
+
+#     except Exception as e:
+#         raise HTTPException(status_code=500, detail=str(e))
 
 async def main():
     uvicorn.run("__main__:app", host="0.0.0.0", port=8002, reload=True, workers=1)
