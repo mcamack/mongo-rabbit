@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from neo4j import AsyncGraphDatabase
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 import asyncio
 import uvicorn
 import os
@@ -57,8 +57,38 @@ app.add_middleware(
 )
 
 # Predefined labels for validation
-ALLOWED_LABELS = ["Requirement", "Specification", "Component"]
-    
+ALLOWED_LABELS_AND_TYPES = {
+    "Requirement": {
+        "allowed_properties": [],
+        "allowed_relationships": {
+            "Requirement": ["child", "parent"],
+            "Requirement Specification": ["part_of"]
+        }
+    },
+    "Requirement_Specification": {
+        "allowed_properties": [],
+        "allowed_relationships": {
+            "Requirement Specification": ["child", "parent"],
+            "Requirement": ["contains"]
+        }
+    },
+}
+
+ALLOWED_LABELS = list(ALLOWED_LABELS_AND_TYPES.keys())
+
+
+######################################################################################
+# Rules Routes
+######################################################################################
+
+@app.get("/graph/rules")
+async def get_rules():
+    return ALLOWED_LABELS_AND_TYPES
+
+######################################################################################
+# Node Routes
+######################################################################################
+
 @app.get("/graph/node/{label}/{name}")
 async def get_node(label: str, name: str):
     if label not in ALLOWED_LABELS:
@@ -81,6 +111,30 @@ async def get_node(label: str, name: str):
         except Exception as e:
             raise HTTPException(status_code=500, detail="Internal server error")
 
+@app.get("/graph/nodes/{label}")
+async def get_nodes_by_label(label: str):
+    if label not in ALLOWED_LABELS:
+        raise HTTPException(status_code=400, detail=f"Label must be from the list: {ALLOWED_LABELS}")
+
+    driver = app.state.neo4j_driver
+    async with driver.session() as session:
+        try:
+            query = "MATCH (n:{label}) RETURN n".format(label=label)
+            result = await session.run(query)
+            nodes = []
+            async for record in result:
+                nodes.append(record["n"]._properties)
+            
+            if not nodes:
+                raise HTTPException(status_code=404, detail="No nodes found with the specified label")
+            
+            return nodes
+        except HTTPException as e:
+            if e.status_code < 500:
+                raise e
+            raise HTTPException(status_code=500, detail="Internal server error")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.post("/graph/node/{label}/{name}")
 async def create_node(label: str, name: str, properties: Dict[str, str]):
@@ -155,59 +209,136 @@ async def delete_node(label: str, name: str):
             raise HTTPException(status_code=500, detail="Internal server error")
 
 
+######################################################################################
+# Relationship Routes
+######################################################################################
 
+class Relationship(BaseModel):
+    from_node_label: str
+    from_node_name: str
+    to_node_label: str
+    to_node_name: str
+    relationship_type: str
+    properties: Optional[Dict] = {}
 
+    # @field_validator('from_node_label', 'to_node_label')
+    # def validate_labels(cls, label):
+    #     if label not in ALLOWED_LABELS:
+    #         raise ValueError(f"Label '{label}' is not allowed. Allowed labels: {ALLOWED_LABELS}")
+    #     return label
 
-
-# # Define a Pydantic model to validate the incoming request body
-# class GraphRelationship(BaseModel):
-#     label1: str
-#     prop1: dict
-#     label2: str
-#     prop2: dict
-#     rel_type: str
-
-# async def create_relationship(label1, prop1, label2, prop2, rel_type):
-#         """
-#         Creates a relationship between two nodes in the graph.
+    @model_validator(mode="after")
+    def validate_relationship_type(cls, values):
+        from_node_label = values.from_node_label
+        relationship_type = values.relationship_type
+        to_node_label = values.to_node_label
+        to_node_name = values.to_node_name
+        relationship_type = values.relationship_type
         
-#         :param label1: Label of the first node
-#         :param prop1: Dictionary of properties for the first node (must have at least one property)
-#         :param label2: Label of the second node
-#         :param prop2: Dictionary of properties for the second node (must have at least one property)
-#         :param rel_type: Type of the relationship (string)
-#         """
-#         driver = app.state.neo4j_driver
-
-#         query = f"""
-#         MERGE (a:{label1} {{ {', '.join(f'{key}: $prop1.{key}' for key in prop1)} }})
-#         MERGE (b:{label2} {{ {', '.join(f'{key}: $prop2.{key}' for key in prop2)} }})
-#         MERGE (a)-[r:{rel_type}]->(b)
-#         RETURN a, r, b
-#         """
-#         print(query)
-#         try:
-#             async with driver.session() as session:
-#                 result = await session.run(query, prop1=prop1, prop2=prop2)
-#                 # return [record for record in result]
-#                 return True
-#         except Exception as e:
-#             raise HTTPException(status_code=500, detail=str(e))
+        # Check if the labels are allowed
+        if from_node_label not in ALLOWED_LABELS:
+            raise ValueError(f"Label '{from_node_label}' is not allowed. Allowed labels: {ALLOWED_LABELS}")
+        if to_node_label not in ALLOWED_LABELS:
+            raise ValueError(f"Label '{to_node_label}' is not allowed. Allowed labels: {ALLOWED_LABELS}")
         
-# @app.post("/graph/relationship/")
-# async def add_relationship(request: GraphRelationship):
-#     try:
-#         result = await create_relationship(
-#             request.label1, request.prop1, request.label2, request.prop2, request.rel_type
-#         )
+        # Check if the relationship Type is allowed based on the from and to Node Labels
+        if from_node_label in ALLOWED_LABELS_AND_TYPES:
+            ALLOWED_RELATIONSHIPS_BY_LABEL = ALLOWED_LABELS_AND_TYPES[from_node_label]["allowed_relationships"]
 
-#         if result:
-#             return {"message": "Relationship created successfully", "result": result}
-#         else:
-#             raise HTTPException(status_code=400, detail="Failed to create relationship")
+            if to_node_label not in ALLOWED_RELATIONSHIPS_BY_LABEL:
+                raise ValueError(f"Relationship types cannot be found for Node Label: {to_node_label}")
+            
+            ALLOWED_RELATIONSHIPS = ALLOWED_RELATIONSHIPS_BY_LABEL[to_node_label]
 
-#     except Exception as e:
-#         raise HTTPException(status_code=500, detail=str(e))
+            if relationship_type not in ALLOWED_RELATIONSHIPS:
+                raise ValueError(f"Relationship type '{relationship_type}' is not allowed. Allowed types: {ALLOWED_RELATIONSHIPS}")
+        else:
+            raise ValueError(f"Relationship types cannot be found for Node Label: {from_node_label}")
+        
+        return values
+
+
+# CREATE relationship
+@app.post("/graph/relationship/")
+async def create_relationship(relationship: Relationship):
+    driver = app.state.neo4j_driver
+    async with driver.session() as session:
+        # Check if both nodes exist
+        check_query = f"""
+        MATCH (from:{relationship.from_node_label} {{name: $from_name}})
+        MATCH (to:{relationship.to_node_label} {{name: $to_name}})
+        RETURN from, to
+        """
+        result = await session.run(check_query, {
+            "from_name": relationship.from_node_name, 
+            "to_name": relationship.to_node_name
+        })
+        
+        if await result.single() is None:
+            raise HTTPException(status_code=404, detail="One or both nodes not found.")
+        
+        # Create the relationship
+        create_query = f"""
+        MATCH (from:{relationship.from_node_label} {{name: $from_name}})
+        MATCH (to:{relationship.to_node_label} {{name: $to_name}})
+        MERGE (from)-[r:{relationship.relationship_type}]->(to)
+        SET r += $properties
+        RETURN r
+        """
+        await session.run(create_query, {
+            "from_name": relationship.from_node_name,
+            "to_name": relationship.to_node_name,
+            "properties": relationship.properties
+        })
+        
+    return {"message": "Relationship created successfully"}
+
+# READ relationships from a node
+@app.get("/graph/relationship/{label}/{name}")
+async def get_relationships_from_node(label: str, name: str):
+    if label not in ALLOWED_LABELS:
+        raise HTTPException(status_code=400, detail=f"Label must be from the list: {ALLOWED_LABELS}")
+
+    driver = app.state.neo4j_driver
+    async with driver.session() as session:
+        # Get all relationships from and to a node
+        query = f"""
+        MATCH (from:{label} {{name: $name}})-[r]->(to)
+        RETURN r, type(r) AS relationship_type, labels(to) AS to_labels, to.name AS to_name, NULL AS labels, NULL AS from_name
+        UNION
+        MATCH (from)-[r]->(to:{label} {{name: $name}})
+        RETURN r, type(r) AS relationship_type, NULL AS to_labels, NULL AS to_name, labels(from) AS labels, from.name AS from_name
+        """
+        result = await session.run(query, {
+            "name": name
+        })
+        relationships = []
+        async for record in result:
+            if record["to_name"]:
+                relationships.append({
+                    "properties": record["r"]._properties,
+                    "type": record["relationship_type"],
+                    "to_node": {
+                        "name": record["to_name"],
+                        "labels": record["to_labels"]
+                    }
+                })
+            elif record["from_name"]:
+                relationships.append({
+                    "properties": record["r"]._properties,
+                    "type": record["relationship_type"],
+                    "from_node": {
+                        "name": record["from_name"],
+                        "labels": record["labels"]
+                    }
+                })
+        
+        if not relationships:
+            raise HTTPException(status_code=404, detail="No relationships found for the specified node.")
+        
+        return relationships
+
+
 
 async def main():
     uvicorn.run("__main__:app", host="0.0.0.0", port=8002, reload=True, workers=1)
