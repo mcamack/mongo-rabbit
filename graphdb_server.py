@@ -214,14 +214,14 @@ async def delete_node(label: str, name: str):
 ######################################################################################
 
 class Relationship(BaseModel):
-    from_node_label: str
-    from_node_name: str
-    to_node_label: str
-    to_node_name: str
+    source_node_label: str
+    source_node_name: str
+    target_node_label: str
+    target_node_name: str
     relationship_type: str
     properties: Optional[Dict] = {}
 
-    # @field_validator('from_node_label', 'to_node_label')
+    # @field_validator('source_node_label', 'target_node_label')
     # def validate_labels(cls, label):
     #     if label not in ALLOWED_LABELS:
     #         raise ValueError(f"Label '{label}' is not allowed. Allowed labels: {ALLOWED_LABELS}")
@@ -229,31 +229,31 @@ class Relationship(BaseModel):
 
     @model_validator(mode="after")
     def validate_relationship_type(cls, values):
-        from_node_label = values.from_node_label
+        source_node_label = values.source_node_label
         relationship_type = values.relationship_type
-        to_node_label = values.to_node_label
-        to_node_name = values.to_node_name
+        target_node_label = values.target_node_label
+        target_node_name = values.target_node_name
         relationship_type = values.relationship_type
         
         # Check if the labels are allowed
-        if from_node_label not in ALLOWED_LABELS:
-            raise ValueError(f"Label '{from_node_label}' is not allowed. Allowed labels: {ALLOWED_LABELS}")
-        if to_node_label not in ALLOWED_LABELS:
-            raise ValueError(f"Label '{to_node_label}' is not allowed. Allowed labels: {ALLOWED_LABELS}")
+        if source_node_label not in ALLOWED_LABELS:
+            raise ValueError(f"Label '{source_node_label}' is not allowed. Allowed labels: {ALLOWED_LABELS}")
+        if target_node_label not in ALLOWED_LABELS:
+            raise ValueError(f"Label '{target_node_label}' is not allowed. Allowed labels: {ALLOWED_LABELS}")
         
-        # Check if the relationship Type is allowed based on the from and to Node Labels
-        if from_node_label in ALLOWED_LABELS_AND_TYPES:
-            ALLOWED_RELATIONSHIPS_BY_LABEL = ALLOWED_LABELS_AND_TYPES[from_node_label]["allowed_relationships"]
+        # Check if the relationship Type is allowed based on the source and target Node Labels
+        if source_node_label in ALLOWED_LABELS_AND_TYPES:
+            ALLOWED_RELATIONSHIPS_BY_LABEL = ALLOWED_LABELS_AND_TYPES[source_node_label]["allowed_relationships"]
 
-            if to_node_label not in ALLOWED_RELATIONSHIPS_BY_LABEL:
-                raise ValueError(f"Relationship types cannot be found for Node Label: {to_node_label}")
+            if target_node_label not in ALLOWED_RELATIONSHIPS_BY_LABEL:
+                raise ValueError(f"Relationship types cannot be found for Node Label: {target_node_label}")
             
-            ALLOWED_RELATIONSHIPS = ALLOWED_RELATIONSHIPS_BY_LABEL[to_node_label]
+            ALLOWED_RELATIONSHIPS = ALLOWED_RELATIONSHIPS_BY_LABEL[target_node_label]
 
             if relationship_type not in ALLOWED_RELATIONSHIPS:
                 raise ValueError(f"Relationship type '{relationship_type}' is not allowed. Allowed types: {ALLOWED_RELATIONSHIPS}")
         else:
-            raise ValueError(f"Relationship types cannot be found for Node Label: {from_node_label}")
+            raise ValueError(f"Relationship types cannot be found for Node Label: {source_node_label}")
         
         return values
 
@@ -265,13 +265,13 @@ async def create_relationship(relationship: Relationship):
     async with driver.session() as session:
         # Check if both nodes exist
         check_query = f"""
-        MATCH (from:{relationship.from_node_label} {{name: $from_name}})
-        MATCH (to:{relationship.to_node_label} {{name: $to_name}})
-        RETURN from, to
+        MATCH (source:{relationship.source_node_label} {{name: $source_name}})
+        MATCH (target:{relationship.target_node_label} {{name: $target_name}})
+        RETURN source, target
         """
         result = await session.run(check_query, {
-            "from_name": relationship.from_node_name, 
-            "to_name": relationship.to_node_name
+            "source_name": relationship.source_node_name, 
+            "target_name": relationship.target_node_name
         })
         
         if await result.single() is None:
@@ -279,23 +279,23 @@ async def create_relationship(relationship: Relationship):
         
         # Create the relationship
         create_query = f"""
-        MATCH (from:{relationship.from_node_label} {{name: $from_name}})
-        MATCH (to:{relationship.to_node_label} {{name: $to_name}})
-        MERGE (from)-[r:{relationship.relationship_type}]->(to)
+        MATCH (source:{relationship.source_node_label} {{name: $source_name}})
+        MATCH (target:{relationship.target_node_label} {{name: $target_name}})
+        MERGE (source)-[r:{relationship.relationship_type}]->(target)
         SET r += $properties
         RETURN r
         """
         await session.run(create_query, {
-            "from_name": relationship.from_node_name,
-            "to_name": relationship.to_node_name,
+            "source_name": relationship.source_node_name,
+            "target_name": relationship.target_node_name,
             "properties": relationship.properties
         })
         
     return {"message": "Relationship created successfully"}
 
-# READ relationships from a node
+# READ relationships for a node
 @app.get("/graph/relationship/{label}/{name}")
-async def get_relationships_from_node(label: str, name: str):
+async def get_node_relationships(label: str, name: str):
     if label not in ALLOWED_LABELS:
         raise HTTPException(status_code=400, detail=f"Label must be from the list: {ALLOWED_LABELS}")
 
@@ -303,32 +303,32 @@ async def get_relationships_from_node(label: str, name: str):
     async with driver.session() as session:
         # Get all relationships from and to a node
         query = f"""
-        MATCH (from:{label} {{name: $name}})-[r]->(to)
-        RETURN r, type(r) AS relationship_type, labels(to) AS to_labels, to.name AS to_name, NULL AS labels, NULL AS from_name
+        MATCH (source:{label} {{name: $name}})-[r]->(target)
+        RETURN r, type(r) AS relationship_type, labels(target) AS target_labels, target.name AS target_name, NULL AS labels, NULL AS source_name
         UNION
-        MATCH (from)-[r]->(to:{label} {{name: $name}})
-        RETURN r, type(r) AS relationship_type, NULL AS to_labels, NULL AS to_name, labels(from) AS labels, from.name AS from_name
+        MATCH (source)-[r]->(target:{label} {{name: $name}})
+        RETURN r, type(r) AS relationship_type, NULL AS target_labels, NULL AS target_name, labels(source) AS labels, source.name AS source_name
         """
         result = await session.run(query, {
             "name": name
         })
         relationships = []
         async for record in result:
-            if record["to_name"]:
+            if record["target_name"]:
                 relationships.append({
                     "properties": record["r"]._properties,
                     "type": record["relationship_type"],
-                    "to_node": {
-                        "name": record["to_name"],
-                        "labels": record["to_labels"]
+                    "target": {
+                        "name": record["target_name"],
+                        "labels": record["target_labels"]
                     }
                 })
-            elif record["from_name"]:
+            elif record["source_name"]:
                 relationships.append({
                     "properties": record["r"]._properties,
                     "type": record["relationship_type"],
-                    "from_node": {
-                        "name": record["from_name"],
+                    "source": {
+                        "name": record["source_name"],
                         "labels": record["labels"]
                     }
                 })
