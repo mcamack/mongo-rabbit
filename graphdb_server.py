@@ -5,6 +5,7 @@ from neo4j import AsyncGraphDatabase
 from pydantic import BaseModel, field_validator, model_validator
 import asyncio
 import uvicorn
+import uuid
 import os
 from typing import List, Dict, Optional
 
@@ -90,7 +91,7 @@ async def get_rules():
 ######################################################################################
 
 @app.get("/graph/node/{label}/{name}")
-async def get_node(label: str, name: str):
+async def get_one_node_by_label(label: str, name: str):
     if label not in ALLOWED_LABELS:
         raise HTTPException(status_code=400, detail=f"Label must be from the list: {ALLOWED_LABELS}")
 
@@ -112,7 +113,7 @@ async def get_node(label: str, name: str):
             raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.get("/graph/nodes/{label}")
-async def get_nodes_by_label(label: str):
+async def get_all_nodes_by_label(label: str):
     if label not in ALLOWED_LABELS:
         raise HTTPException(status_code=400, detail=f"Label must be from the list: {ALLOWED_LABELS}")
 
@@ -136,6 +137,26 @@ async def get_nodes_by_label(label: str):
         except Exception as e:
             raise HTTPException(status_code=500, detail="Internal server error")
 
+# Lookup a node by its UUID
+@app.get("/graph/uuid/node/{uuid}")
+async def get_node_by_uuid(uuid: str):
+    driver = app.state.neo4j_driver
+    async with driver.session() as session:
+        try:
+            query = "MATCH (n {uuid: $uuid}) RETURN n"
+            result = await session.run(query, {"uuid": uuid})
+            record = await result.single()
+            if not record:
+                raise HTTPException(status_code=404, detail="Node not found")
+            
+            return record["n"]._properties
+        except HTTPException as e:
+            if e.status_code < 500:
+                raise e
+            raise HTTPException(status_code=500, detail="Internal server error")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail="Internal server error")
+
 @app.post("/graph/node/{label}/{name}")
 async def create_node(label: str, name: str, properties: Dict[str, str]):
     if label not in ALLOWED_LABELS:
@@ -144,16 +165,21 @@ async def create_node(label: str, name: str, properties: Dict[str, str]):
     driver = app.state.neo4j_driver
     async with driver.session() as session:
         try:
+            # Check if the node already exists
             query = "MATCH (n:{label} {{name: $name}}) RETURN n LIMIT 1".format(label=label)
             result = await session.run(query, {"name": name})
             if (await result.single()) is not None:
                 raise HTTPException(status_code=400, detail="A node with the same label and name already exists.")
 
-            # Create the node
+            # Generate a UUID for the new node
+            node_uuid = str(uuid.uuid4())
+            properties["uuid"] = node_uuid
+
+            # Create the node with the UUID property
             query = "CREATE (n:{label} {{name: $name}}) SET n += $properties RETURN n".format(label=label)
             await session.run(query, {"name": name, "properties": properties})
 
-            return {"message": "Node created successfully"}
+            return {"message": "Node created successfully", "uuid": node_uuid}
         except HTTPException as e:
             if e.status_code < 500:
                 raise e
@@ -162,9 +188,12 @@ async def create_node(label: str, name: str, properties: Dict[str, str]):
             raise HTTPException(status_code=500, detail="Internal server error")
     
 @app.patch("/graph/node/{label}/{name}")
-async def update_node(label: str, name: str, node_update: Dict[str, Optional[str]]):
+async def update_node_by_label_name(label: str, name: str, node_update: Dict[str, Optional[str]]):
     if label not in ALLOWED_LABELS:
         raise HTTPException(status_code=400, detail=f"Label must be from the list: {ALLOWED_LABELS}")
+
+    if "uuid" in node_update:
+        raise HTTPException(status_code=400, detail="The 'uuid' property cannot be updated.")
 
     driver = app.state.neo4j_driver
     async with driver.session() as session:
@@ -175,6 +204,32 @@ async def update_node(label: str, name: str, node_update: Dict[str, Optional[str
             query += updates + " RETURN n"
 
             params = {"name": name, **node_update}
+            result = await session.run(query, params)
+            if not (await result.single()):
+                raise HTTPException(status_code=404, detail="Node not found or no properties updated")
+
+            return {"message": "Node updated successfully"}
+        except HTTPException as e:
+            if e.status_code < 500:
+                raise e
+            raise HTTPException(status_code=500, detail="Internal server error")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.patch("/graph/uuid/node/{uuid}")
+async def update_node_by_uuid(uuid: str, node_update: Dict[str, Optional[str]]):
+    if "uuid" in node_update:
+        raise HTTPException(status_code=400, detail="The 'uuid' property cannot be updated.")
+
+    driver = app.state.neo4j_driver
+    async with driver.session() as session:
+        try:
+            # Update the properties of the existing node
+            query = "MATCH (n {uuid: $uuid}) SET "
+            updates = ", ".join([f"n.{key} = ${key}" for key in node_update.keys()])
+            query += updates + " RETURN n"
+
+            params = {"uuid": uuid, **node_update}
             result = await session.run(query, params)
             if not (await result.single()):
                 raise HTTPException(status_code=404, detail="Node not found or no properties updated")
@@ -208,6 +263,24 @@ async def delete_node(label: str, name: str):
         except Exception as e:
             raise HTTPException(status_code=500, detail="Internal server error")
 
+# Delete a node by its UUID
+@app.delete("/graph/uuid/node/{uuid}")
+async def delete_node_by_uuid(uuid: str):
+    driver = app.state.neo4j_driver
+    async with driver.session() as session:
+        try:
+            query = "MATCH (n {uuid: $uuid}) DETACH DELETE n"
+            result = await session.run(query, {"uuid": uuid})
+            if (await result.consume()).counters.nodes_deleted == 0:
+                raise HTTPException(status_code=404, detail="Node not found")
+
+            return {"message": "Node deleted successfully"}
+        except HTTPException as e:
+            if e.status_code < 500:
+                raise e
+            raise HTTPException(status_code=500, detail="Internal server error")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail="Internal server error")
 
 ######################################################################################
 # Relationship Routes
@@ -277,7 +350,11 @@ async def create_relationship(relationship: Relationship):
         if await result.single() is None:
             raise HTTPException(status_code=404, detail="One or both nodes not found.")
         
-        # Create the relationship
+        # Generate a UUID for the new relationship
+        relationship_uuid = str(uuid.uuid4())
+        relationship.properties["uuid"] = relationship_uuid
+        
+        # Create the relationship with the UUID property
         create_query = f"""
         MATCH (source:{relationship.source_node_label} {{name: $source_name}})
         MATCH (target:{relationship.target_node_label} {{name: $target_name}})
@@ -291,7 +368,7 @@ async def create_relationship(relationship: Relationship):
             "properties": relationship.properties
         })
         
-    return {"message": "Relationship created successfully"}
+    return {"message": "Relationship created successfully", "uuid": relationship_uuid}
 
 # READ relationships for a node
 @app.get("/graph/relationship/{label}/{name}")
@@ -338,7 +415,77 @@ async def get_node_relationships(label: str, name: str):
         
         return relationships
 
+# Lookup a relationship by its UUID
+@app.get("/graph/uuid/relationship/{uuid}")
+async def get_relationship_by_uuid(uuid: str):
+    driver = app.state.neo4j_driver
+    async with driver.session() as session:
+        try:
+            query = "MATCH (source)-[r {uuid: $uuid}]->(target) RETURN r, source, target"
+            result = await session.run(query, {"uuid": uuid})
+            record = await result.single()
+            if not record:
+                raise HTTPException(status_code=404, detail="Relationship not found")
+            
+            relationship_data = {
+                "relationship": record["r"]._properties,
+                "source": record["source"]._properties,
+                "target": record["target"]._properties
+            }
+            
+            return relationship_data
+        except HTTPException as e:
+            if e.status_code < 500:
+                raise e
+            raise HTTPException(status_code=500, detail="Internal server error")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail="Internal server error")
 
+# Update a relationship by its UUID
+@app.patch("/graph/uuid/relationship/{uuid}")
+async def update_relationship_by_uuid(uuid: str, relationship_update: Dict[str, Optional[str]]):
+    if "uuid" in relationship_update:
+        raise HTTPException(status_code=400, detail="The 'uuid' property cannot be updated.")
+    
+    driver = app.state.neo4j_driver
+    async with driver.session() as session:
+        try:
+            # Update the properties of the existing relationship
+            query = "MATCH ()-[r {uuid: $uuid}]->() SET "
+            updates = ", ".join([f"r.{key} = ${key}" for key in relationship_update.keys()])
+            query += updates + " RETURN r"
+
+            params = {"uuid": uuid, **relationship_update}
+            result = await session.run(query, params)
+            if not (await result.single()):
+                raise HTTPException(status_code=404, detail="Relationship not found or no properties updated")
+
+            return {"message": "Relationship updated successfully"}
+        except HTTPException as e:
+            if e.status_code < 500:
+                raise e
+            raise HTTPException(status_code=500, detail="Internal server error")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail="Internal server error")
+
+# Delete a relationship by its UUID
+@app.delete("/graph/uuid/relationship/{uuid}")
+async def delete_relationship_by_uuid(uuid: str):
+    driver = app.state.neo4j_driver
+    async with driver.session() as session:
+        try:
+            query = "MATCH ()-[r {uuid: $uuid}]->() DELETE r"
+            result = await session.run(query, {"uuid": uuid})
+            if (await result.consume()).counters.relationships_deleted == 0:
+                raise HTTPException(status_code=404, detail="Relationship not found")
+
+            return {"message": "Relationship deleted successfully"}
+        except HTTPException as e:
+            if e.status_code < 500:
+                raise e
+            raise HTTPException(status_code=500, detail="Internal server error")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail="Internal server error")
 
 async def main():
     uvicorn.run("__main__:app", host="0.0.0.0", port=8002, reload=True, workers=1)
