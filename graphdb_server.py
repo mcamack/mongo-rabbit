@@ -60,14 +60,14 @@ app.add_middleware(
 # Predefined labels for validation
 ALLOWED_LABELS_AND_TYPES = {
     "Requirement": {
-        "allowed_properties": [],
+        "allowed_properties": ["name", "ID", "mass", "value"],
         "allowed_relationships": {
             "Requirement": ["child", "parent"],
             "Requirement Specification": ["part_of"]
         }
     },
     "Requirement_Specification": {
-        "allowed_properties": [],
+        "allowed_properties": ["name", "ID"],
         "allowed_relationships": {
             "Requirement Specification": ["child", "parent"],
             "Requirement": ["contains"]
@@ -126,8 +126,8 @@ async def get_all_nodes_by_label(label: str):
             async for record in result:
                 nodes.append(record["n"]._properties)
             
-            if not nodes:
-                raise HTTPException(status_code=404, detail="No nodes found with the specified label")
+            # if not nodes:
+            #     raise HTTPException(status_code=404, detail="No nodes found with the specified label")
             
             return nodes
         except HTTPException as e:
@@ -198,12 +198,18 @@ async def update_node_by_label_name(label: str, name: str, node_update: Dict[str
     driver = app.state.neo4j_driver
     async with driver.session() as session:
         try:
-            # Update the properties of the existing node
-            query = "MATCH (n:{label} {{name: $name}}) SET ".format(label=label)
-            updates = ", ".join([f"n.{key} = ${key}" for key in node_update.keys()])
-            query += updates + " RETURN n"
+            # Update or remove the properties of the existing node
+            set_updates = ", ".join([f"n.{key} = ${key}" for key, value in node_update.items() if value is not None])
+            remove_updates = ", ".join([f"n.{key}" for key, value in node_update.items() if value is None])
 
-            params = {"name": name, **node_update}
+            query = "MATCH (n:{label} {{name: $name}}) ".format(label=label)
+            if set_updates:
+                query += f"SET {set_updates} "
+            if remove_updates:
+                query += f"REMOVE {remove_updates} "
+            query += "RETURN n"
+
+            params = {"name": name, **{key: value for key, value in node_update.items() if value is not None}}
             result = await session.run(query, params)
             if not (await result.single()):
                 raise HTTPException(status_code=404, detail="Node not found or no properties updated")
@@ -224,12 +230,18 @@ async def update_node_by_uuid(uuid: str, node_update: Dict[str, Optional[str]]):
     driver = app.state.neo4j_driver
     async with driver.session() as session:
         try:
-            # Update the properties of the existing node
-            query = "MATCH (n {uuid: $uuid}) SET "
-            updates = ", ".join([f"n.{key} = ${key}" for key in node_update.keys()])
-            query += updates + " RETURN n"
+            # Update or remove the properties of the existing node
+            set_updates = ", ".join([f"n.{key} = ${key}" for key, value in node_update.items() if value is not None])
+            remove_updates = ", ".join([f"n.{key}" for key, value in node_update.items() if value is None])
 
-            params = {"uuid": uuid, **node_update}
+            query = "MATCH (n {uuid: $uuid}) "
+            if set_updates:
+                query += f"SET {set_updates} "
+            if remove_updates:
+                query += f"REMOVE {remove_updates} "
+            query += "RETURN n"
+
+            params = {"uuid": uuid, **{key: value for key, value in node_update.items() if value is not None}}
             result = await session.run(query, params)
             if not (await result.single()):
                 raise HTTPException(status_code=404, detail="Node not found or no properties updated")
@@ -446,16 +458,23 @@ async def get_relationship_by_uuid(uuid: str):
 async def update_relationship_by_uuid(uuid: str, relationship_update: Dict[str, Optional[str]]):
     if "uuid" in relationship_update:
         raise HTTPException(status_code=400, detail="The 'uuid' property cannot be updated.")
-    
+
     driver = app.state.neo4j_driver
     async with driver.session() as session:
         try:
-            # Update the properties of the existing relationship
-            query = "MATCH ()-[r {uuid: $uuid}]->() SET "
-            updates = ", ".join([f"r.{key} = ${key}" for key in relationship_update.keys()])
-            query += updates + " RETURN r"
+            # Update or remove the properties of the existing relationship
+            # A value of null (with no quotes) in a json property value field will delete that property
+            set_updates = ", ".join([f"r.{key} = ${key}" for key, value in relationship_update.items() if value is not None])
+            remove_updates = ", ".join([f"r.{key}" for key, value in relationship_update.items() if value is None])
 
-            params = {"uuid": uuid, **relationship_update}
+            query = "MATCH ()-[r {uuid: $uuid}]->() "
+            if set_updates:
+                query += f"SET {set_updates} "
+            if remove_updates:
+                query += f"REMOVE {remove_updates} "
+            query += "RETURN r"
+
+            params = {"uuid": uuid, **{key: value for key, value in relationship_update.items() if value is not None}}
             result = await session.run(query, params)
             if not (await result.single()):
                 raise HTTPException(status_code=404, detail="Relationship not found or no properties updated")
